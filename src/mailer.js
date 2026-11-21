@@ -402,15 +402,23 @@ export async function enviarCodigo({ to, code, purpose, username, expiresMinutes
   } catch (error) {
     // Log completo con stack para diagnosticar en Render.
     console.error('[MAIL_ERROR]', error);
+    const causa = error?.cause;
+    const motivo = [
+      error?.code || error?.name,
+      error?.message,
+      causa?.code,
+      causa?.message
+    ].filter(Boolean).join(' | ');
     console.error('[seguridad] sendMail falló:', {
       provider: PROVEEDOR_HTTP || 'smtp',
       code: error.code,
       responseCode: error.responseCode,
       command: error.command,
       response: error.response,
-      message: error.message
+      message: error.message,
+      cause: causa?.message
     });
-    return { sent: false, dev: false, error: 'No se pudo enviar el correo.' };
+    return { sent: false, dev: false, error: motivo || 'No se pudo enviar el correo.' };
   }
 }
 
