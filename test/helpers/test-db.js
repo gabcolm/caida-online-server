@@ -23,7 +23,7 @@ export async function reiniciarBaseDePruebas() {
 
   try {
     await pool.query(`
-      DROP TABLE IF EXISTS match_players, matches, audit_log, login_challenges,
+      DROP TABLE IF EXISTS purchases, social_accounts, friendships, match_players, matches, audit_log, login_challenges,
         recovery_codes, account_codes, sessions, users CASCADE
     `);
   } finally {

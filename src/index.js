@@ -76,8 +76,30 @@ await db.iniciar();
 configurarAuditoria(db);
 const salas = new Map();
 const salaPorUsuario = new Map();
+const salasPrivadas = new Map();
+const salaPrivadaPorUsuario = new Map();
 const cola = [];
 const socketsPorUsuario = new Map();
+
+function enviarAUsuario(userId, tipo, datos = {}) {
+  const set = socketsPorUsuario.get(Number(userId));
+  if (!set) return false;
+  let enviado = false;
+  for (const ws of set) {
+    if (ws.readyState === WebSocket.OPEN) {
+      enviar(ws, tipo, datos);
+      enviado = true;
+    }
+  }
+  return enviado;
+}
+
+function usuarioEnLinea(userId) {
+  const set = socketsPorUsuario.get(Number(userId));
+  if (!set) return false;
+  for (const ws of set) if (ws.readyState === WebSocket.OPEN) return true;
+  return false;
+}
 
 async function crearRedis() {
   const url = process.env.REDIS_URL || '';
@@ -703,6 +725,116 @@ async function manejarHttp(req, res) {
       return responder(res, 200, { history: await db.historialUsuario(user.id, limite) });
     }
 
+    if (req.method === 'GET' && url.pathname === '/api/friends') {
+      const user = await usuarioDeRequest(req);
+      if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
+
+      const [amigos, solicitudes] = await Promise.all([
+        db.listarAmigos(user.id),
+        db.solicitudesAmistad(user.id)
+      ]);
+
+      return responder(res, 200, {
+        myFriendCode: user.friendCode,
+        friends: amigos.map((amigo) => ({ ...amigo, online: usuarioEnLinea(amigo.id) })),
+        incomingRequests: solicitudes.incoming,
+        outgoingRequests: solicitudes.outgoing
+      });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/friends/request') {
+      const user = await usuarioDeRequest(req);
+      if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
+
+      const body = await leerJson(req);
+      const consulta = String(body.query || '').trim();
+      if (consulta.length < 3) {
+        return responder(res, 400, { error: 'Escribe un código de amigo o un alias.', code: 'BAD_QUERY' });
+      }
+
+      let destino = await db.usuarioPorFriendCode(consulta);
+      if (!destino) destino = await db.usuarioPorIdentificador(consulta);
+      if (!destino) {
+        return responder(res, 404, { error: 'No encontramos ese código o alias.', code: 'NOT_FOUND' });
+      }
+      if (destino.id === user.id) {
+        return responder(res, 400, { error: 'No puedes agregarte a ti mismo.', code: 'SELF_FRIEND' });
+      }
+
+      try {
+        const resultado = await db.crearSolicitudAmistad(user.id, destino.id);
+        if (resultado.autoAccepted) {
+          enviarAUsuario(destino.id, 'friend_accepted', { userId: user.id, username: user.username });
+        } else {
+          enviarAUsuario(destino.id, 'friend_request', {
+            fromUserId: user.id,
+            username: user.username,
+            friendCode: user.friendCode
+          });
+        }
+        auditar({
+          event: resultado.autoAccepted ? 'friend_accepted' : 'friend_request',
+          userId: user.id,
+          username: user.username,
+          ip,
+          userAgent,
+          detail: { friendId: destino.id, username: destino.username }
+        });
+        return responder(res, 200, { ok: true, autoAccepted: resultado.autoAccepted, friendId: destino.id });
+      } catch (error) {
+        return responder(res, 400, { error: error.message, code: 'FRIEND_ERROR' });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/friends/respond') {
+      const user = await usuarioDeRequest(req);
+      if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
+
+      const body = await leerJson(req);
+      const action = body.action === 'accept' ? 'accept' : body.action === 'reject' ? 'reject' : null;
+      if (!action) return responder(res, 400, { error: 'Acción inválida.', code: 'BAD_ACTION' });
+
+      const fila = await db.responderSolicitud(body.requestId, user.id, action);
+      if (!fila) return responder(res, 404, { error: 'La solicitud ya no existe.', code: 'NOT_FOUND' });
+
+      if (action === 'accept') {
+        enviarAUsuario(fila.requester_id, 'friend_accepted', { userId: user.id, username: user.username });
+      } else {
+        enviarAUsuario(fila.requester_id, 'friend_rejected', { userId: user.id, username: user.username });
+      }
+
+      auditar({
+        event: action === 'accept' ? 'friend_accept' : 'friend_reject',
+        userId: user.id,
+        username: user.username,
+        ip,
+        userAgent,
+        detail: { requesterId: Number(fila.requester_id) }
+      });
+
+      return responder(res, 200, { ok: true });
+    }
+
+    const amigoEliminar = url.pathname.match(/^\/api\/friends\/(\d+)$/);
+    if (req.method === 'DELETE' && amigoEliminar) {
+      const user = await usuarioDeRequest(req);
+      if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
+
+      const eliminado = await db.eliminarAmistad(user.id, Number(amigoEliminar[1]));
+      if (!eliminado) return responder(res, 404, { error: 'Ese amigo no existe.', code: 'NOT_FOUND' });
+
+      auditar({
+        event: 'friend_removed',
+        userId: user.id,
+        username: user.username,
+        ip,
+        userAgent,
+        detail: { friendId: Number(amigoEliminar[1]) }
+      });
+
+      return responder(res, 200, { ok: true });
+    }
+
     if (req.method === 'POST' && url.pathname === '/api/logout') {
       const auth = leerBearer(req);
       await db.revocarSesion(auth);
@@ -832,6 +964,22 @@ async function manejarMensaje(ws, data) {
       return iniciarSala(ws);
     case 'leaveRoom':
       return salirDeSala(ws);
+    case 'create_private_room':
+      return crearLobbyPrivado(ws);
+    case 'join_private_room':
+      return unirseLobbyPrivado(ws, mensaje.roomCode, mensaje.seat);
+    case 'select_seat':
+      return seleccionarAsientoPrivado(ws, mensaje.seat);
+    case 'swap_seat':
+      return intercambiarAsientosPrivados(ws, mensaje.seatA, mensaje.seatB);
+    case 'update_private_room_settings':
+      return actualizarAjustesLobbyPrivado(ws, mensaje);
+    case 'invite_friend':
+      return invitarAmigoLobbyPrivado(ws, mensaje.friendId);
+    case 'leave_private_room':
+      return salirLobbyPrivado(ws);
+    case 'start_private_match':
+      return iniciarPartidaPrivada(ws);
     case 'playCard':
       return jugarCarta(ws, mensaje.cardId);
     case 'voteTribilin':
@@ -1047,6 +1195,9 @@ function desconectar(ws) {
 
   salirDeCola(user.id);
 
+  const lobbyPrivado = quitarDeLobbyPrivado(user.id);
+  if (lobbyPrivado) difundirLobbyPrivado(lobbyPrivado);
+
   const sala = salaDeUsuario(user.id);
   if (!sala) return;
   const jugador = sala.players.find((p) => p && p.userId === user.id);
@@ -1109,6 +1260,277 @@ function iniciarPartida(sala) {
   console.log(`[partida] ${sala.code} iniciada: ${jugadores.map((p) => p.name).join(', ')}`);
   difundirSala(sala);
   difundirEstado(sala);
+}
+
+function socketDeUsuario(userId) {
+  const set = socketsPorUsuario.get(Number(userId));
+  if (!set) return null;
+  for (const ws of set) {
+    if (ws.readyState === WebSocket.OPEN) return ws;
+  }
+  return null;
+}
+
+function lobbyPrivadoDeUsuario(userId) {
+  const code = salaPrivadaPorUsuario.get(Number(userId));
+  return code ? salasPrivadas.get(code) : null;
+}
+
+function vistaLobbyPrivado(sala) {
+  return {
+    code: sala.code,
+    hostId: sala.hostId,
+    betAmount: sala.betAmount,
+    allowBots: sala.allowBots,
+    status: sala.status,
+    seats: sala.seats.map((s, i) => (s
+      ? { seat: i, userId: s.userId, username: s.username, friendCode: s.friendCode || null, isBot: !!s.isBot }
+      : { seat: i, userId: null }))
+  };
+}
+
+function difundirLobbyPrivado(sala) {
+  for (const s of sala.seats) {
+    if (s && s.userId) enviarAUsuario(s.userId, 'private_room_state', { room: vistaLobbyPrivado(sala) });
+  }
+}
+
+function quitarDeLobbyPrivado(userId) {
+  const id = Number(userId);
+  const code = salaPrivadaPorUsuario.get(id);
+  if (!code) return null;
+
+  const sala = salasPrivadas.get(code);
+  if (!sala) {
+    salaPrivadaPorUsuario.delete(id);
+    return null;
+  }
+
+  const indice = sala.seats.findIndex((s) => s && s.userId === id);
+  if (indice >= 0) sala.seats[indice] = null;
+  salaPrivadaPorUsuario.delete(id);
+
+  const humanos = sala.seats.filter((s) => s && s.userId);
+  if (!humanos.length) {
+    salasPrivadas.delete(code);
+    return null;
+  }
+
+  if (sala.hostId === id) sala.hostId = humanos[0].userId;
+  return sala;
+}
+
+function crearLobbyPrivado(ws) {
+  const user = ws.usuario;
+  if (salaDeUsuario(user.id) || lobbyPrivadoDeUsuario(user.id)) {
+    return enviarError(ws, 'Ya estás en una sala.');
+  }
+
+  let code;
+  do code = generarCodigo(); while (salasPrivadas.has(code) || salas.has(code));
+
+  const sala = {
+    code,
+    hostId: user.id,
+    betAmount: 0,
+    allowBots: false,
+    status: 'waiting',
+    createdAt: Date.now(),
+    seats: [
+      { userId: user.id, username: user.username, friendCode: user.friendCode || null },
+      null,
+      null,
+      null
+    ]
+  };
+
+  salasPrivadas.set(code, sala);
+  salaPrivadaPorUsuario.set(user.id, code);
+  auditar({ event: 'private_room_create', userId: user.id, username: user.username, ip: ws.ip, userAgent: ws.userAgent, detail: { code } });
+  difundirLobbyPrivado(sala);
+}
+
+function unirseLobbyPrivado(ws, roomCode, asientoPreferido = null) {
+  const user = ws.usuario;
+  const code = String(roomCode || '').trim().toUpperCase();
+  const sala = salasPrivadas.get(code);
+  if (!sala || sala.status !== 'waiting') return enviarError(ws, 'La sala privada no existe o ya empezó.');
+
+  if (salaPrivadaPorUsuario.get(user.id) === code) {
+    difundirLobbyPrivado(sala);
+    return;
+  }
+  if (salaDeUsuario(user.id) || lobbyPrivadoDeUsuario(user.id)) {
+    return enviarError(ws, 'Ya estás en otra sala.');
+  }
+  if (sala.seats.every(Boolean)) return enviarError(ws, 'La sala privada está llena.');
+
+  let asiento = Number.isInteger(Number(asientoPreferido)) ? Number(asientoPreferido) : -1;
+  if (asiento < 0 || asiento > 3 || sala.seats[asiento]) {
+    asiento = sala.seats[2] ? sala.seats.findIndex((s) => !s) : 2;
+    if (asiento < 0 || sala.seats[asiento]) asiento = sala.seats.findIndex((s) => !s);
+  }
+  if (asiento < 0) return enviarError(ws, 'La sala privada está llena.');
+
+  sala.seats[asiento] = { userId: user.id, username: user.username, friendCode: user.friendCode || null };
+  salaPrivadaPorUsuario.set(user.id, code);
+  auditar({ event: 'private_room_join', userId: user.id, username: user.username, ip: ws.ip, userAgent: ws.userAgent, detail: { code, seat: asiento } });
+  difundirLobbyPrivado(sala);
+}
+
+function seleccionarAsientoPrivado(ws, asiento) {
+  const user = ws.usuario;
+  const sala = lobbyPrivadoDeUsuario(user.id);
+  if (!sala) return enviarError(ws, 'No estás en una sala privada.');
+
+  const destino = Number(asiento);
+  if (!Number.isInteger(destino) || destino < 0 || destino > 3) return enviarError(ws, 'Asiento inválido.');
+  if (sala.seats[destino]) return enviarError(ws, 'Ese asiento está ocupado.');
+
+  const actual = sala.seats.findIndex((s) => s && s.userId === user.id);
+  if (actual < 0) return enviarError(ws, 'No estás sentado en esta sala.');
+  if (actual === destino) return;
+
+  const jugador = sala.seats[actual];
+  sala.seats[actual] = null;
+  sala.seats[destino] = jugador;
+  difundirLobbyPrivado(sala);
+}
+
+function intercambiarAsientosPrivados(ws, seatA, seatB) {
+  const user = ws.usuario;
+  const sala = lobbyPrivadoDeUsuario(user.id);
+  if (!sala) return enviarError(ws, 'No estás en una sala privada.');
+  if (sala.hostId !== user.id) return enviarError(ws, 'Solo el anfitrión puede intercambiar asientos.');
+
+  const a = Number(seatA);
+  const b = Number(seatB);
+  if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || a > 3 || b < 0 || b > 3 || a === b) {
+    return enviarError(ws, 'Asientos inválidos.');
+  }
+
+  [sala.seats[a], sala.seats[b]] = [sala.seats[b], sala.seats[a]];
+  difundirLobbyPrivado(sala);
+}
+
+function actualizarAjustesLobbyPrivado(ws, mensaje = {}) {
+  const user = ws.usuario;
+  const sala = lobbyPrivadoDeUsuario(user.id);
+  if (!sala) return enviarError(ws, 'No estás en una sala privada.');
+  if (sala.hostId !== user.id) return enviarError(ws, 'Solo el anfitrión cambia la apuesta.');
+
+  if (mensaje.betAmount !== undefined) {
+    const apuesta = Number(mensaje.betAmount);
+    if (![0, 500, 2500, 10000].includes(apuesta)) return enviarError(ws, 'Apuesta no válida.');
+    sala.betAmount = apuesta;
+    if (apuesta !== 0) sala.allowBots = false;
+  }
+
+  if (mensaje.allowBots !== undefined) {
+    if (sala.betAmount !== 0) return enviarError(ws, 'Los bots solo se permiten en salas gratis.');
+    sala.allowBots = !!mensaje.allowBots;
+  }
+
+  difundirLobbyPrivado(sala);
+}
+
+async function invitarAmigoLobbyPrivado(ws, friendId) {
+  const user = ws.usuario;
+  const sala = lobbyPrivadoDeUsuario(user.id);
+  if (!sala) return enviarError(ws, 'Crea o únete a una sala privada primero.');
+
+  const amigo = Number(friendId);
+  if (!Number.isInteger(amigo) || amigo === user.id) return enviarError(ws, 'Amigo inválido.');
+  if (!(await db.sonAmigos(user.id, amigo))) return enviarError(ws, 'Ese jugador no está en tu lista de amigos.');
+  if (!usuarioEnLinea(amigo)) return enviarError(ws, 'Tu amigo no está conectado ahora.');
+
+  enviarAUsuario(amigo, 'private_room_invite', {
+    fromUserId: user.id,
+    fromUsername: user.username,
+    roomCode: sala.code,
+    betAmount: sala.betAmount
+  });
+  enviar(ws, 'private_room_invite_sent', { friendId: amigo, roomCode: sala.code });
+}
+
+function salirLobbyPrivado(ws) {
+  const user = ws.usuario;
+  const sala = quitarDeLobbyPrivado(user.id);
+  if (sala) difundirLobbyPrivado(sala);
+  enviar(ws, 'private_room_left', {});
+}
+
+async function iniciarPartidaPrivada(ws) {
+  const user = ws.usuario;
+  const sala = lobbyPrivadoDeUsuario(user.id);
+  if (!sala) return enviarError(ws, 'No estás en una sala privada.');
+  if (sala.hostId !== user.id) return enviarError(ws, 'Solo el anfitrión puede iniciar.');
+
+  const humanos = sala.seats
+    .map((s, seat) => (s && s.userId ? { ...s, seat } : null))
+    .filter(Boolean);
+
+  if (humanos.length < 2) return enviarError(ws, 'Necesitas al menos 2 jugadores para iniciar.');
+  if (sala.betAmount > 0 && humanos.length !== 4) {
+    return enviarError(ws, 'Para apostar monedas deben estar los 4 jugadores (2v2).', 'INSUFFICIENT_PLAYERS');
+  }
+
+  if (sala.betAmount > 0) {
+    const cobro = await db.cobrarApuestas(humanos.map((h) => h.userId), sala.betAmount);
+    if (!cobro.ok) {
+      const afectado = humanos.find((h) => h.userId === cobro.userId);
+      return enviarError(
+        ws,
+        `A ${afectado ? afectado.username : 'un jugador'} le faltan monedas para la apuesta de ${sala.betAmount}.`,
+        'INSUFFICIENT_COINS'
+      );
+    }
+  }
+
+  const juego = crearSala('private');
+  juego.hostUserId = sala.hostId;
+  juego.apuesta = sala.betAmount;
+  juego.pozo = sala.betAmount * humanos.length;
+  juego.codigoPrivado = sala.code;
+
+  for (let seat = 0; seat < 4; seat++) {
+    const s = sala.seats[seat];
+    if (s && s.userId) {
+      juego.players[seat] = {
+        seat,
+        userId: s.userId,
+        name: s.username,
+        socket: socketDeUsuario(s.userId),
+        connected: true,
+        reconnectedAt: null
+      };
+      salaPorUsuario.set(s.userId, juego.code);
+    } else {
+      juego.players[seat] = {
+        seat,
+        userId: null,
+        name: `Bot ${seat + 1}`,
+        socket: null,
+        connected: true,
+        reconnectedAt: null,
+        isBot: true
+      };
+    }
+  }
+
+  salasPrivadas.delete(sala.code);
+  for (const h of humanos) salaPrivadaPorUsuario.delete(h.userId);
+
+  auditar({
+    event: 'private_match_start',
+    userId: user.id,
+    username: user.username,
+    ip: ws.ip,
+    userAgent: ws.userAgent,
+    detail: { code: sala.code, bet: sala.betAmount, humans: humanos.length }
+  });
+
+  iniciarPartida(juego);
 }
 
 function salaDeUsuario(userId) {
@@ -1176,7 +1598,10 @@ async function guardarResultadoAsync(sala) {
         rivalScore: scores[1 - equipo]
       };
     });
-    if (jugadores.length !== 4) return;
+    if (jugadores.length !== 4 || jugadores.some((j) => !j.userId)) {
+      console.log(`[historial] ${sala.code}: partida con bots o incompleta; no se guarda en ranking.`);
+      return;
+    }
 
     const id = await db.registrarPartida({
       roomCode: sala.code,
@@ -1202,6 +1627,27 @@ async function guardarResultadoAsync(sala) {
         hands: juego.handNumber
       }
     });
+
+    if (sala.apuesta > 0 && sala.pozo > 0) {
+      const ganadores = jugadores.filter((j) => j.userId && j.won);
+      if (ganadores.length) {
+        const premio = Math.floor(sala.pozo / ganadores.length);
+        for (const ganador of ganadores) {
+          await db.sumarMonedas(ganador.userId, premio);
+        }
+        auditar({
+          event: 'private_bet_settled',
+          userId: null,
+          detail: {
+            sala: sala.codigoPrivado || sala.code,
+            pozo: sala.pozo,
+            premio,
+            ganadores: ganadores.map((g) => g.userId)
+          }
+        });
+        console.log(`[apuesta] ${sala.code}: pozo ${sala.pozo}, premio ${premio} a ${ganadores.length} ganador(es).`);
+      }
+    }
 }
 
 function estadoSala(sala, userId) {

@@ -51,6 +51,21 @@ CREATE TABLE IF NOT EXISTS users (
   created_at BIGINT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_key ON users(email_key) WHERE email_key IS NOT NULL;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS friend_code TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_friend_code ON users(friend_code) WHERE friend_code IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS friendships (
+  id BIGSERIAL PRIMARY KEY,
+  requester_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  addressee_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_friendships_pair
+  ON friendships (LEAST(requester_id, addressee_id), GREATEST(requester_id, addressee_id));
+CREATE INDEX IF NOT EXISTS idx_friendships_requester ON friendships(requester_id, status);
+CREATE INDEX IF NOT EXISTS idx_friendships_addressee ON friendships(addressee_id, status);
 
 CREATE TABLE IF NOT EXISTS sessions (
   token TEXT PRIMARY KEY,
@@ -172,6 +187,33 @@ export class BaseDatos {
   /** Crea tablas e índices si no existen. */
   async iniciar() {
     await this.pool.query(ESQUEMA);
+    await this.asegurarFriendCodes();
+  }
+
+  async generarFriendCode() {
+    for (let i = 0; i < 25; i++) {
+      const code = `CAIDA-${randomInt(1000, 9999)}`;
+      const { rowCount } = await this.pool.query('SELECT 1 FROM users WHERE friend_code = $1', [code]);
+      if (rowCount === 0) return code;
+    }
+    const alfabeto = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    let code = '';
+    for (let i = 0; i < 6; i++) code += alfabeto[randomInt(0, alfabeto.length)];
+    return code;
+  }
+
+  async asignarFriendCode(userId) {
+    const code = await this.generarFriendCode();
+    await this.pool.query('UPDATE users SET friend_code = $1 WHERE id = $2', [code, Number(userId)]);
+    return code;
+  }
+
+  async asegurarFriendCodes() {
+    const { rows } = await this.pool.query('SELECT id FROM users WHERE friend_code IS NULL');
+    for (const fila of rows) {
+      await this.asignarFriendCode(fila.id);
+    }
+    return rows.length;
   }
 
   async crearUsuario(username, password, email = null) {
@@ -187,6 +229,7 @@ export class BaseDatos {
          RETURNING id`,
         [username, key, salt, hash, emailLimpio, emailKey, Date.now()]
       );
+      await this.asignarFriendCode(rows[0].id);
       return this.usuarioPorId(rows[0].id);
     } catch (error) {
       if (error.code === '23505') {
@@ -721,6 +764,158 @@ export class BaseDatos {
     };
   }
 
+  async usuarioPorFriendCode(codigo) {
+    const limpio = String(codigo || '').trim().toUpperCase();
+    if (!limpio) return null;
+    const { rows } = await this.pool.query('SELECT * FROM users WHERE UPPER(friend_code) = $1', [limpio]);
+    return rows[0] ? this.publico(rows[0]) : null;
+  }
+
+  async listarAmigos(userId) {
+    const { rows } = await this.pool.query(
+      `SELECT u.id, u.username, u.friend_code, u.coins, u.email,
+              EXISTS(SELECT 1 FROM social_accounts s WHERE s.user_id = u.id AND s.provider = 'facebook') AS facebook_linked
+       FROM friendships f
+       JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
+       WHERE f.status = 'accepted' AND (f.requester_id = $1 OR f.addressee_id = $1)
+       ORDER BY u.username ASC`,
+      [Number(userId)]
+    );
+    return rows.map((fila) => ({
+      id: Number(fila.id),
+      username: fila.username,
+      friendCode: fila.friend_code || null,
+      coins: Number(fila.coins),
+      avatar: (Number(fila.id) % 4) + 1,
+      facebookLinked: fila.facebook_linked === true
+    }));
+  }
+
+  async solicitudesAmistad(userId) {
+    const entrantes = await this.pool.query(
+      `SELECT f.id AS request_id, u.id AS user_id, u.username, u.friend_code, f.created_at
+       FROM friendships f JOIN users u ON u.id = f.requester_id
+       WHERE f.addressee_id = $1 AND f.status = 'pending'
+       ORDER BY f.created_at DESC`,
+      [Number(userId)]
+    );
+    const salientes = await this.pool.query(
+      `SELECT f.id AS request_id, u.id AS user_id, u.username, u.friend_code, f.created_at
+       FROM friendships f JOIN users u ON u.id = f.addressee_id
+       WHERE f.requester_id = $1 AND f.status = 'pending'
+       ORDER BY f.created_at DESC`,
+      [Number(userId)]
+    );
+    return {
+      incoming: entrantes.rows.map((fila) => ({
+        requestId: Number(fila.request_id),
+        fromUserId: Number(fila.user_id),
+        username: fila.username,
+        friendCode: fila.friend_code || null
+      })),
+      outgoing: salientes.rows.map((fila) => ({
+        requestId: Number(fila.request_id),
+        toUserId: Number(fila.user_id),
+        username: fila.username,
+        friendCode: fila.friend_code || null
+      }))
+    };
+  }
+
+  async crearSolicitudAmistad(requesterId, addresseeId) {
+    const a = Number(requesterId);
+    const b = Number(addresseeId);
+    if (a === b) throw new Error('No puedes agregarte a ti mismo.');
+
+    const { rows } = await this.pool.query(
+      `SELECT * FROM friendships
+       WHERE (requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)
+       LIMIT 1`,
+      [a, b]
+    );
+    const existente = rows[0];
+
+    if (existente) {
+      if (existente.status === 'accepted') throw new Error('Ya son amigos.');
+      if (existente.status === 'pending') {
+        if (Number(existente.requester_id) === a) throw new Error('Ya enviaste una solicitud.');
+        await this.pool.query(
+          `UPDATE friendships SET status = 'accepted', updated_at = NOW() WHERE id = $1`,
+          [existente.id]
+        );
+        return { autoAccepted: true, requestId: Number(existente.id) };
+      }
+      await this.pool.query(
+        `UPDATE friendships SET requester_id = $1, addressee_id = $2, status = 'pending', updated_at = NOW() WHERE id = $3`,
+        [a, b, existente.id]
+      );
+      return { autoAccepted: false, requestId: Number(existente.id) };
+    }
+
+    const { rows: creada } = await this.pool.query(
+      `INSERT INTO friendships (requester_id, addressee_id, status) VALUES ($1, $2, 'pending') RETURNING id`,
+      [a, b]
+    );
+    return { autoAccepted: false, requestId: Number(creada[0].id) };
+  }
+
+  async responderSolicitud(requestId, addresseeId, action) {
+    const estado = action === 'accept' ? 'accepted' : 'rejected';
+    const { rows } = await this.pool.query(
+      `UPDATE friendships SET status = $1, updated_at = NOW()
+       WHERE id = $2 AND addressee_id = $3 AND status = 'pending'
+       RETURNING *`,
+      [estado, Number(requestId), Number(addresseeId)]
+    );
+    return rows[0] || null;
+  }
+
+  async eliminarAmistad(userId, friendId) {
+    const { rowCount } = await this.pool.query(
+      `DELETE FROM friendships
+       WHERE status = 'accepted'
+         AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))`,
+      [Number(userId), Number(friendId)]
+    );
+    return rowCount > 0;
+  }
+
+  async sonAmigos(a, b) {
+    const { rowCount } = await this.pool.query(
+      `SELECT 1 FROM friendships
+       WHERE status = 'accepted'
+         AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))`,
+      [Number(a), Number(b)]
+    );
+    return rowCount > 0;
+  }
+
+  async cobrarApuestas(userIds, monto) {
+    const cantidad = Math.trunc(Number(monto) || 0);
+    if (cantidad <= 0) return { ok: true };
+    const cliente = await this.pool.connect();
+    try {
+      await cliente.query('BEGIN');
+      for (const id of userIds) {
+        const { rows } = await cliente.query(
+          'UPDATE users SET coins = coins - $1 WHERE id = $2 AND coins >= $1 RETURNING coins',
+          [cantidad, Number(id)]
+        );
+        if (!rows[0]) {
+          await cliente.query('ROLLBACK');
+          return { ok: false, userId: Number(id) };
+        }
+      }
+      await cliente.query('COMMIT');
+      return { ok: true };
+    } catch (error) {
+      await cliente.query('ROLLBACK').catch(() => {});
+      throw error;
+    } finally {
+      cliente.release();
+    }
+  }
+
   async sumarMonedas(userId, cantidad) {
     const delta = Math.trunc(Number(cantidad) || 0);
     const { rows } = await this.pool.query(
@@ -796,7 +991,8 @@ export class BaseDatos {
           [String(provider), String(providerId), user.id, Date.now()]
         );
         await cliente.query('COMMIT');
-        return { user: this.publico(user), created: true };
+        await this.asignarFriendCode(user.id);
+        return { user: await this.usuarioPorId(user.id), created: true };
       } catch (error) {
         await cliente.query('ROLLBACK').catch(() => {});
         if (error.code !== '23505') throw error;
@@ -819,7 +1015,9 @@ export class BaseDatos {
       coins: Number(row.coins),
       email: row.email || null,
       verified: row.verified === true || Number(row.verified) === 1,
-      totpEnabled: row.totp_enabled === true || Number(row.totp_enabled) === 1
+      totpEnabled: row.totp_enabled === true || Number(row.totp_enabled) === 1,
+      friendCode: row.friend_code || null,
+      avatar: (Number(row.id) % 4) + 1
     };
   }
 }

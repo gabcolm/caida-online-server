@@ -55,7 +55,7 @@ class Cliente {
       const mensaje = await this.esperar('gameState', timeout);
       if (mensaje.state && mensaje.state.phase === fase) return mensaje;
     }
-    throw new Error('No llegó la fase ' + fase);
+    throw new Error('No llegÃƒÆ’Ã‚Â³ la fase ' + fase);
   }
 
   enviar(payload) {
@@ -75,7 +75,7 @@ async function esperarServidor() {
     } catch { /* reintentar */ }
     await new Promise((r) => setTimeout(r, 150));
   }
-  throw new Error('El servidor no arrancó.');
+  throw new Error('El servidor no arrancÃƒÆ’Ã‚Â³.');
 }
 
 async function registrar(nombre) {
@@ -123,7 +123,7 @@ test.after(() => {
   try { rmSync(dirTemp, { recursive: true, force: true }); } catch { /* ignore */ }
 });
 
-test('flujo HTTP + WebSocket: 4 jugadores, matchmaking, turno y reconexión', async () => {
+test('flujo HTTP + WebSocket: 4 jugadores, matchmaking, turno y reconexiÃƒÆ’Ã‚Â³n', async () => {
   const sufijo = Date.now().toString().slice(-6);
   const usuarios = [];
   for (let i = 0; i < 4; i++) {
@@ -187,7 +187,7 @@ test('flujo HTTP + WebSocket: 4 jugadores, matchmaking, turno y reconexión', as
   await new Promise((r) => setTimeout(r, 100));
 });
 
-test('sala privada: crear, unirse, iniciar y código inválido', async () => {  const sufijo = Date.now().toString().slice(-6);
+test('sala privada: crear, unirse, iniciar y cÃƒÆ’Ã‚Â³digo invÃƒÆ’Ã‚Â¡lido', async () => {  const sufijo = Date.now().toString().slice(-6);
   const usuarios = [];
   for (let i = 0; i < 4; i++) usuarios.push(await registrar('Priv' + sufijo + i));
 
@@ -228,7 +228,7 @@ test('sala privada: crear, unirse, iniciar y código inválido', async () => {  
   await extra.esperar('hello');
   extra.enviar({ type: 'joinRoom', code: 'NOEXIS' });
   const error = await extra.esperar('error', 5000);
-  assert.match(error.message, /no existe|comenzó|sala/i);
+  assert.match(error.message, /no existe|comenzÃƒÆ’Ã‚Â³|sala/i);
   extra.cerrar();
   for (const c of clientes) c.cerrar();
   await new Promise((r) => setTimeout(r, 100));
@@ -247,7 +247,7 @@ async function jugarHastaTerminar(cliente, timeout = 120000) {
       cliente.enviar({ type: 'playCard', cardId: estado.ownHand[0] });
     }
   }
-  throw new Error('La partida no terminó a tiempo.');
+  throw new Error('La partida no terminÃƒÆ’Ã‚Â³ a tiempo.');
 }
 
 test('partida completa: se guarda en historial y ranking persistente', async () => {
@@ -313,7 +313,7 @@ test('partida completa: se guarda en historial y ranking persistente', async () 
   await new Promise((r) => setTimeout(r, 100));
 });
 
-test('verificación de correo y recuperación de contraseña', async () => {
+test('verificaciÃƒÆ’Ã‚Â³n de correo y recuperaciÃƒÆ’Ã‚Â³n de contraseÃƒÆ’Ã‚Â±a', async () => {
   const sufijo = Date.now().toString().slice(-6);
   const usuario = 'Seg' + sufijo;
   const email = usuario.toLowerCase() + '@example.com';
@@ -385,7 +385,7 @@ test('verificación de correo y recuperación de contraseña', async () => {
   assert.equal(sesionVieja.status, 401);
 });
 
-test('2FA TOTP, códigos de recuperación y auditoría de accesos', async () => {
+test('2FA TOTP, cÃƒÆ’Ã‚Â³digos de recuperaciÃƒÆ’Ã‚Â³n y auditorÃƒÆ’Ã‚Â­a de accesos', async () => {
   const sufijo = Date.now().toString().slice(-6);
   const usuario = 'Dos' + sufijo;
   const email = usuario.toLowerCase() + '@example.com';
@@ -459,7 +459,7 @@ test('2FA TOTP, códigos de recuperación y auditoría de accesos', async () => 
   const pagina = await fetch(BASE + '/admin/auditoria');
   assert.equal(pagina.status, 200);
   const html = await pagina.text();
-  assert.match(html, /Auditoría/);
+  assert.match(html, /Auditor/);
   assert.match(html, /CARGAR EVENTOS/);
 });
 
@@ -508,7 +508,104 @@ test('login social crea la cuenta una sola vez', async () => {
   assert.equal(invalido.status, 400);
 });
 
-test('limita intentos de autenticación por IP', async () => {
+
+test('amigos: cÃƒÆ’Ã‚Â³digo, solicitud y aceptaciÃƒÆ’Ã‚Â³n', async () => {
+  const sufijo = Date.now().toString().slice(-6);
+  const a = await registrar('AmA' + sufijo);
+  const b = await registrar('AmB' + sufijo);
+
+  assert.match(a.user.friendCode, /^CAIDA-\d{4}$/);
+
+  const listaA = await (await fetch(BASE + '/api/friends', {
+    headers: { Authorization: 'Bearer ' + a.token }
+  })).json();
+  assert.equal(listaA.myFriendCode, a.user.friendCode);
+
+  const solicitud = await postJson('/api/friends/request', { query: b.user.friendCode }, a.token);
+  assert.equal(solicitud.status, 200);
+
+  const listaB = await (await fetch(BASE + '/api/friends', {
+    headers: { Authorization: 'Bearer ' + b.token }
+  })).json();
+  const recibida = listaB.incomingRequests.find((r) => r.fromUserId === a.user.id);
+  assert.ok(recibida);
+
+  const respuesta = await postJson('/api/friends/respond', {
+    requestId: recibida.requestId,
+    action: 'accept'
+  }, b.token);
+  assert.equal(respuesta.status, 200);
+
+  const listaFinal = await (await fetch(BASE + '/api/friends', {
+    headers: { Authorization: 'Bearer ' + a.token }
+  })).json();
+  const amigo = listaFinal.friends.find((f) => f.id === b.user.id);
+  assert.ok(amigo);
+  assert.equal(amigo.username, b.user.username);
+});
+
+test('sala privada: asientos, apuesta e inicio con saldo suficiente', async () => {
+  const sufijo = Date.now().toString().slice(-5);
+  const jugadores = [];
+  for (let i = 0; i < 4; i++) jugadores.push(await registrar('Pv' + sufijo + i));
+
+  const clientes = jugadores.map((j) => new Cliente(j.token));
+  for (const cliente of clientes) await cliente.abrir();
+
+  try {
+    clientes[0].enviar({ type: 'create_private_room' });
+    const creada = await clientes[0].esperar('private_room_state');
+    const sala = creada.room;
+    assert.match(sala.code, /^[A-Z0-9]{6}$/);
+    assert.equal(sala.hostId, jugadores[0].user.id);
+    assert.equal(sala.seats[0].userId, jugadores[0].user.id);
+
+    clientes[1].enviar({ type: 'join_private_room', roomCode: sala.code });
+    const conDos = await clientes[1].esperar('private_room_state');
+    assert.equal(conDos.room.seats[2].userId, jugadores[1].user.id);
+
+    clientes[1].enviar({ type: 'select_seat', seat: 1 });
+    const movida = await clientes[1].esperar('private_room_state');
+    assert.equal(movida.room.seats[1].userId, jugadores[1].user.id);
+    assert.equal(movida.room.seats[2].userId, null);
+
+    clientes[0].enviar({ type: 'update_private_room_settings', betAmount: 2500 });
+    let apuesta = null;
+    for (let i = 0; i < 10; i++) {
+      apuesta = await clientes[0].esperar('private_room_state');
+      if (apuesta.room.betAmount === 2500) break;
+    }
+    assert.equal(apuesta.room.betAmount, 2500);
+
+    for (let i = 2; i < 4; i++) {
+      clientes[i].enviar({ type: 'join_private_room', roomCode: sala.code });
+      await clientes[i].esperar('private_room_state');
+    }
+
+    clientes[0].enviar({ type: 'start_private_match' });
+    const errorSaldo = await clientes[0].esperar('error');
+    assert.match(errorSaldo.message, /faltan monedas/i);
+
+    clientes[0].enviar({ type: 'update_private_room_settings', betAmount: 500 });
+    for (let i = 0; i < 10; i++) {
+      const estado = await clientes[0].esperar('private_room_state');
+      if (estado.room.betAmount === 500) break;
+    }
+
+    clientes[0].enviar({ type: 'start_private_match' });
+    const estadoJuego = await clientes[0].esperar('gameState', 8000);
+    assert.ok(estadoJuego.state);
+
+    const perfil = await (await fetch(BASE + '/api/me', {
+      headers: { Authorization: 'Bearer ' + jugadores[0].token }
+    })).json();
+    assert.equal(perfil.user.coins, 1500);
+  } finally {
+    for (const cliente of clientes) cliente.cerrar();
+  }
+});
+
+test('limita intentos de autenticaciÃƒÆ’Ã‚Â³n por IP', async () => {
   let bloqueado = false;
   for (let i = 0; i < 60 && !bloqueado; i++) {
     const respuesta = await postJson('/api/login', { username: 'Rate' + i, password: 'incorrecta' });
