@@ -1,0 +1,24 @@
+{
+  "name": "caida-online-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Backend de autenticación, salas y partidas de Caída Online",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "mail:test": "node tools/test-mail.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "dotenv": "^18.0.10",
+    "nodemailer": "^10.6.1",
+    "qrcode": "^1.5.4",
+    "redis": "^6.3.1",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  }
+}
