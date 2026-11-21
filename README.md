@@ -355,18 +355,54 @@ NODE_ENV=production
 DEV_CODES=0
 TRUST_PROXY=1
 CORS_ORIGIN=*
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USER=tu@gmail.com
-SMTP_PASS=contraseña-de-aplicación
-SMTP_FROM="Caída Online <tu@gmail.com>"
 ADMIN_TOKEN=un-token-largo
+
+# Correo por API HTTP (Render Free bloquea los puertos SMTP)
+MAIL_PROVIDER=resend
+RESEND_API_KEY=re_...
+MAIL_FROM="Caída Online <no-reply@tudominio.com>"
 ```
+
+Las variables `SMTP_*` solo sirven en local o en instancias de pago: Render Free
+bloquea la salida a los puertos 25, 465 y 587.
 
 No definas `PORT`: Render lo inyecta. Si `RENDER=true` (lo pone Render), el
 servidor activa `TRUST_PROXY` automáticamente para leer `X-Forwarded-For` y
 `X-Forwarded-Proto`. El WebSocket viaja por el mismo puerto y Render lo expone
 como `wss://`; en Unity usa `https://<servicio>.onrender.com`.
+
+### Correo en Render
+
+Render **Free** bloquea el tráfico saliente a los puertos SMTP `25`, `465` y
+`587`; con Gmail verás `ETIMEDOUT` en los logs y el correo nunca sale. Para el
+plan gratuito usa un proveedor por HTTPS (443):
+
+- **Resend** (recomendado, 100 correos/día):
+  1. Crea una cuenta y una API key (`re_...`).
+  2. Verifica tu dominio, o usa `onboarding@resend.dev` para pruebas.
+  3. En Render define `MAIL_PROVIDER=resend`, `RESEND_API_KEY` y `MAIL_FROM`.
+- **Brevo** (300 correos/día): `MAIL_PROVIDER=brevo`, `BREVO_API_KEY` y
+  `MAIL_FROM`.
+- `MAIL_PROVIDER=smtp` fuerza el envío por SMTP (local o instancia de pago).
+
+El servidor acepta `SMTP_*`, `MAIL_*`, `RESEND_*` y `BREVO_*` con o sin comillas
+y con espacios sobrantes: `env.js` los limpia al arrancar.
+
+En los logs de Render busca:
+
+- `[seguridad] correo por API HTTP (resend)` y `[seguridad] diagnóstico correo`
+  al arrancar.
+- `[MAIL_OK] correo ... aceptado por ...` cuando el proveedor acepta el envío.
+- `[MAIL_ERROR]` con el error completo si falla: `ETIMEDOUT`/`ECONNREFUSED`
+  (puerto bloqueado), `EAUTH` (credenciales SMTP) o `HTTP_401`/`HTTP_403`
+  (API key incorrecta o dominio sin verificar).
+- `[recovery] solicitud recibida { cuentaEncontrada, tieneCorreo }` para saber si
+  la cuenta existe en la base de datos de Render.
+
+> `POST /api/recover` responde siempre `200 {"sent":true}` aunque el usuario o
+> su correo no existan (evita enumerar cuentas). Si la base de Render está
+> vacía o la cuenta no tiene correo, no se envía nada: revisa el log
+> `[recovery] solicitud recibida`.
 
 ### Persistencia de datos en Render
 

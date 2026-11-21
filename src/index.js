@@ -363,6 +363,12 @@ async function manejarHttp(req, res) {
       const user = db.usuarioPorIdentificador(body.identifier);
       let devCode;
 
+      console.log('[recovery] solicitud recibida', {
+        identificador: String(body.identifier || '').trim().slice(0, 3) + '***',
+        cuentaEncontrada: !!user,
+        tieneCorreo: !!user?.email
+      });
+
       if (user && user.email) {
         const { codigo } = db.crearCodigo(user.id, 'reset', RECOVERY_CODE_TTL_MS);
         if (DEV_CODES) devCode = codigo;
@@ -386,7 +392,7 @@ async function manejarHttp(req, res) {
             detail: { sent: !!envio.sent, dev: !!envio.dev, error: envio.error || null }
           });
         }).catch((error) => {
-          console.error('[recovery] envío de correo falló:', error.message);
+          console.error('[MAIL_ERROR]', error);
           auditar({
             event: 'recovery_email_failed',
             severity: 'warn',
@@ -1164,7 +1170,7 @@ async function enviarCodigoVerificacion(user) {
       detail: { sent: !!envio.sent, dev: !!envio.dev, error: envio.error || null }
     });
   }).catch((error) => {
-    console.error('[verification] envío de correo falló:', error.message);
+    console.error('[MAIL_ERROR]', error);
     auditar({
       event: 'verification_email_failed',
       severity: 'warn',
