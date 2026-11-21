@@ -22,11 +22,9 @@ export function auditar({ event, severity = 'info', userId = null, username = nu
   };
 
   if (baseDatos) {
-    try {
-      baseDatos.registrarAuditoria(evento);
-    } catch (error) {
+    baseDatos.registrarAuditoria(evento).catch((error) => {
       console.error('[auditoria] no se pudo guardar el evento:', error.message);
-    }
+    });
   }
 
   if (severity === 'warn' || severity === 'critical') {

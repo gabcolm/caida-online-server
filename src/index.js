@@ -25,9 +25,8 @@ import { configurarMailer, enviarCodigo } from './mailer.js';
 import { configurarAuditoria, auditar } from './audit.js';
 import { paginaAuditoria } from './admin.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUERTO = Number(process.env.PORT || 3000);
-const DB_PATH = process.env.DB_PATH || path.join(__dirname, '..', 'data', 'caida.db');
+const DATABASE_URL = process.env.DATABASE_URL || '';
 const ORIGENES_PERMITIDOS = String(process.env.CORS_ORIGIN || '*').split(',').map((o) => o.trim()).filter(Boolean);
 const TURNO_MS = Number(process.env.TURN_MS || 30000);
 const ESPERA_RECONEXION_MS = Number(process.env.RECONNECT_MS || 45000);
@@ -62,7 +61,8 @@ const VERIFY_CODE_TTL_MS = VERIFY_CODE_TTL_MIN * 60 * 1000;
 const MAX_CUERPO_BYTES = 32 * 1024;
 const SEGURO = Boolean(TLS_CERT && TLS_KEY);
 
-const db = new BaseDatos(DB_PATH);
+const db = new BaseDatos(DATABASE_URL || undefined);
+await db.iniciar();
 configurarAuditoria(db);
 const salas = new Map();
 const salaPorUsuario = new Map();
@@ -116,10 +116,10 @@ const RUTAS_AUTH = new Set([
 
 configurarMailer();
 
-function iniciarSesionHttp(user, res, ip, userAgent, detalle = {}) {
-  const acceso = db.datosAcceso(user.id);
-  const token = db.crearSesion(user.id);
-  db.actualizarUltimoAcceso(user.id, ip);
+async function iniciarSesionHttp(user, res, ip, userAgent, detalle = {}) {
+  const acceso = await await db.datosAcceso(user.id);
+  const token = await await db.crearSesion(user.id);
+  await db.actualizarUltimoAcceso(user.id, ip);
   auditar({
     event: 'login_ok',
     userId: user.id,
@@ -191,8 +191,8 @@ async function manejarHttp(req, res) {
         return responder(res, 400, { error: 'Escribe un correo electrónico para registrarte.' });
       }
       try {
-        const user = db.crearUsuario(String(body.username).trim(), String(body.password), email);
-        const token = db.crearSesion(user.id);
+        const user = await db.crearUsuario(String(body.username).trim(), String(body.password), email);
+        const token = await db.crearSesion(user.id);
         const verification = user.email ? await enviarCodigoVerificacion(user) : { ok: true, sent: false };
         auditar({
           event: 'register',
@@ -212,7 +212,7 @@ async function manejarHttp(req, res) {
       const body = await leerJson(req);
       const alias = String(body.username || '');
       const claveFallos = `${ip}:${normalizarUsuario(alias)}`;
-      const user = db.verificarCredenciales(alias, body.password || '');
+      const user = await db.verificarCredenciales(alias, body.password || '');
       if (!user) {
         const fallos = await limitadorFallosLogin.hit(claveFallos);
         const severidad = !fallos.ok ? 'critical' : (fallos.restantes <= ALERT_FAIL_THRESHOLD ? 'warn' : 'info');
@@ -235,7 +235,7 @@ async function manejarHttp(req, res) {
       await limitadorFallosLogin.reset(claveFallos);
 
       if (user.totpEnabled) {
-        const challengeToken = db.crearDesafioLogin(user.id);
+        const challengeToken = await db.crearDesafioLogin(user.id);
         auditar({
           event: 'login_2fa_required',
           userId: user.id,
@@ -251,27 +251,27 @@ async function manejarHttp(req, res) {
         });
       }
 
-      return iniciarSesionHttp(user, res, ip, userAgent, { metodo: 'password' });
+      return await iniciarSesionHttp(user, res, ip, userAgent, { metodo: 'password' });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/login/2fa') {
       const body = await leerJson(req);
-      const desafio = db.desafioLogin(body.challengeToken);
+      const desafio = await db.desafioLogin(body.challengeToken);
       if (!desafio) {
         return responder(res, 401, { error: 'El desafío venció. Inicia sesión de nuevo.', code: 'BAD_2FA_CHALLENGE' });
       }
-      const user = db.usuarioPorId(desafio.user_id);
-      const datos = db.datosTotp(desafio.user_id);
+      const user = await db.usuarioPorId(desafio.user_id);
+      const datos = await db.datosTotp(desafio.user_id);
       if (!user || !datos?.enabled || !datos.secret) {
-        db.borrarDesafio(desafio.token);
+        await db.borrarDesafio(desafio.token);
         return responder(res, 401, { error: 'La verificación en dos pasos no está disponible.', code: 'BAD_2FA_CHALLENGE' });
       }
 
       const codigo = String(body.code || '').trim();
       const validoTotp = verificarTotp(datos.secret, codigo);
-      const validoRecuperacion = !validoTotp && db.consumirCodigoRecuperacion(user.id, codigo);
+      const validoRecuperacion = !validoTotp && await db.consumirCodigoRecuperacion(user.id, codigo);
       if (!validoTotp && !validoRecuperacion) {
-        const intentos = db.fallarDesafio(desafio.token);
+        const intentos = await db.fallarDesafio(desafio.token);
         auditar({
           event: 'login_2fa_fail',
           severity: intentos >= 3 ? 'critical' : 'warn',
@@ -289,7 +289,7 @@ async function manejarHttp(req, res) {
         });
       }
 
-      db.borrarDesafio(desafio.token);
+      await db.borrarDesafio(desafio.token);
       if (validoRecuperacion) {
         auditar({
           event: 'login_recovery_code',
@@ -300,28 +300,28 @@ async function manejarHttp(req, res) {
           userAgent
         });
       }
-      return iniciarSesionHttp(user, res, ip, userAgent, {
+      return await iniciarSesionHttp(user, res, ip, userAgent, {
         metodo: validoRecuperacion ? 'recovery_code' : 'totp'
       });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/me') {
-      const user = usuarioDeRequest(req);
+      const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
-      return responder(res, 200, { user, stats: db.estadisticasUsuario(user.id) });
+      return responder(res, 200, { user, stats: await db.estadisticasUsuario(user.id) });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/account/email') {
-      const user = usuarioDeRequest(req);
+      const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
       const body = await leerJson(req);
       const errorEmail = validarEmail(body.email);
       if (errorEmail) return responder(res, 400, { error: errorEmail });
       if (!body.password) return responder(res, 400, { error: 'Confirma tu contraseña para cambiar el correo.' });
-      const credenciales = db.verificarCredenciales(user.username, String(body.password));
+      const credenciales = await db.verificarCredenciales(user.username, String(body.password));
       if (!credenciales) return responder(res, 401, { error: 'Contraseña incorrecta.', code: 'BAD_CREDENTIALS' });
       try {
-        const actualizado = db.actualizarEmail(user.id, body.email);
+        const actualizado = await db.actualizarEmail(user.id, body.email);
         const verification = await enviarCodigoVerificacion(actualizado);
         auditar({
           event: 'email_changed',
@@ -339,7 +339,7 @@ async function manejarHttp(req, res) {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/verify/request') {
-      const user = usuarioDeRequest(req);
+      const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
       if (!user.email) return responder(res, 400, { error: 'Primero agrega un correo a tu cuenta.' });
       if (user.verified) return responder(res, 200, { ok: true, alreadyVerified: true });
@@ -348,19 +348,19 @@ async function manejarHttp(req, res) {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/verify') {
-      const user = usuarioDeRequest(req);
+      const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
       const body = await leerJson(req);
-      const resultado = db.consumirCodigo(user.id, 'verify', body.code);
+      const resultado = await db.consumirCodigo(user.id, 'verify', body.code);
       if (!resultado.ok) return responder(res, 400, { error: resultado.error, code: 'BAD_CODE' });
-      const verificado = db.marcarVerificado(user.id);
+      const verificado = await db.marcarVerificado(user.id);
       auditar({ event: 'account_verified', userId: user.id, username: user.username, ip, userAgent });
       return responder(res, 200, { ok: true, user: verificado });
     }
 
     if (req.method === 'POST' && (url.pathname === '/api/recovery/request' || url.pathname === '/api/recover')) {
       const body = await leerJson(req);
-      const user = db.usuarioPorIdentificador(body.identifier);
+      const user = await db.usuarioPorIdentificador(body.identifier);
       let devCode;
 
       console.log('[recovery] solicitud recibida', {
@@ -370,7 +370,7 @@ async function manejarHttp(req, res) {
       });
 
       if (user && user.email) {
-        const { codigo } = db.crearCodigo(user.id, 'reset', RECOVERY_CODE_TTL_MS);
+        const { codigo } = await db.crearCodigo(user.id, 'reset', RECOVERY_CODE_TTL_MS);
         if (DEV_CODES) devCode = codigo;
 
         // Fire-and-forget: el correo sale por detrás y la respuesta HTTP no espera.
@@ -430,11 +430,11 @@ async function manejarHttp(req, res) {
       const body = await leerJson(req);
       const errorPassword = validarPassword(body.password);
       if (errorPassword) return responder(res, 400, { error: errorPassword });
-      const user = db.usuarioPorIdentificador(body.identifier);
+      const user = await db.usuarioPorIdentificador(body.identifier);
       if (!user) return responder(res, 400, { error: 'Código inválido o expirado.', code: 'BAD_CODE' });
-      const resultado = db.consumirCodigo(user.id, 'reset', body.code);
+      const resultado = await db.consumirCodigo(user.id, 'reset', body.code);
       if (!resultado.ok) return responder(res, 400, { error: resultado.error, code: 'BAD_CODE' });
-      db.actualizarPassword(user.id, String(body.password));
+      await db.actualizarPassword(user.id, String(body.password));
       auditar({
         event: 'password_reset_ok',
         severity: 'warn',
@@ -448,9 +448,9 @@ async function manejarHttp(req, res) {
 
     if (req.method === 'POST' && url.pathname === '/api/recover/verify') {
       const body = await leerJson(req);
-      const user = db.usuarioPorIdentificador(body.identifier);
+      const user = await db.usuarioPorIdentificador(body.identifier);
       if (!user) return responder(res, 400, { error: 'Código inválido o expirado.', code: 'BAD_CODE' });
-      const resultado = db.verificarCodigo(user.id, 'reset', body.code);
+      const resultado = await db.verificarCodigo(user.id, 'reset', body.code);
       if (!resultado.ok) {
         auditar({
           event: 'recover_verify_fail',
@@ -467,12 +467,12 @@ async function manejarHttp(req, res) {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/2fa/setup') {
-      const user = usuarioDeRequest(req);
+      const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
-      const datos = db.datosTotp(user.id);
+      const datos = await db.datosTotp(user.id);
       if (datos?.enabled) return responder(res, 409, { error: 'La verificación en dos pasos ya está activa.', code: '2FA_ALREADY_ENABLED' });
       const secreto = generarSecretoTotp();
-      db.guardarTotpPendiente(user.id, secreto);
+      await db.guardarTotpPendiente(user.id, secreto);
       const otpauth = urlTotp(secreto, user.username, TOTP_EMISOR);
       let qr = null;
       try {
@@ -495,40 +495,40 @@ async function manejarHttp(req, res) {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/2fa/enable') {
-      const user = usuarioDeRequest(req);
+      const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
       const body = await leerJson(req);
-      const datos = db.datosTotp(user.id);
+      const datos = await db.datosTotp(user.id);
       if (datos?.enabled) return responder(res, 409, { error: 'La verificación en dos pasos ya está activa.', code: '2FA_ALREADY_ENABLED' });
       if (!datos?.pending) return responder(res, 400, { error: 'Primero inicia la configuración de 2FA.', code: '2FA_NOT_STARTED' });
       if (!verificarTotp(datos.pending, body.code)) {
         auditar({ event: '2fa_enable_fail', severity: 'warn', userId: user.id, username: user.username, ip, userAgent });
         return responder(res, 400, { error: 'El código de 6 dígitos no es válido.', code: 'BAD_2FA_CODE' });
       }
-      db.activarTotp(user.id, datos.pending);
-      const recoveryCodes = db.crearCodigosRecuperacion(user.id);
-      const actualizado = db.usuarioPorId(user.id);
+      await db.activarTotp(user.id, datos.pending);
+      const recoveryCodes = await db.crearCodigosRecuperacion(user.id);
+      const actualizado = await db.usuarioPorId(user.id);
       auditar({ event: '2fa_enabled', userId: user.id, username: user.username, ip, userAgent });
       return responder(res, 200, { ok: true, user: actualizado, recoveryCodes });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/2fa/disable') {
-      const user = usuarioDeRequest(req);
+      const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
       const body = await leerJson(req);
-      const datos = db.datosTotp(user.id);
+      const datos = await db.datosTotp(user.id);
       if (!datos?.enabled || !datos.secret) {
         return responder(res, 409, { error: 'La verificación en dos pasos no está activa.', code: '2FA_NOT_ENABLED' });
       }
       const clave = String(body.code || '').trim();
       const porTotp = verificarTotp(datos.secret, clave);
-      const porRecuperacion = !porTotp && db.consumirCodigoRecuperacion(user.id, clave);
+      const porRecuperacion = !porTotp && await db.consumirCodigoRecuperacion(user.id, clave);
       if (!porTotp && !porRecuperacion) {
         auditar({ event: '2fa_disable_fail', severity: 'warn', userId: user.id, username: user.username, ip, userAgent });
         return responder(res, 400, { error: 'El código no es válido.', code: 'BAD_2FA_CODE' });
       }
-      db.desactivarTotp(user.id);
-      const actualizado = db.usuarioPorId(user.id);
+      await db.desactivarTotp(user.id);
+      const actualizado = await db.usuarioPorId(user.id);
       auditar({
         event: porRecuperacion ? '2fa_disabled_recovery' : '2fa_disabled',
         severity: 'warn',
@@ -541,21 +541,21 @@ async function manejarHttp(req, res) {
     }
 
     if (req.method === 'POST' && url.pathname === '/api/2fa/recovery') {
-      const user = usuarioDeRequest(req);
+      const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
       const body = await leerJson(req);
-      const datos = db.datosTotp(user.id);
+      const datos = await db.datosTotp(user.id);
       if (!datos?.enabled || !datos.secret) {
         return responder(res, 409, { error: 'La verificación en dos pasos no está activa.', code: '2FA_NOT_ENABLED' });
       }
       const clave = String(body.code || '').trim();
       const porTotp = verificarTotp(datos.secret, clave);
-      const porRecuperacion = !porTotp && db.consumirCodigoRecuperacion(user.id, clave);
+      const porRecuperacion = !porTotp && await db.consumirCodigoRecuperacion(user.id, clave);
       if (!porTotp && !porRecuperacion) {
         auditar({ event: '2fa_recovery_fail', severity: 'warn', userId: user.id, username: user.username, ip, userAgent });
         return responder(res, 400, { error: 'El código no es válido.', code: 'BAD_2FA_CODE' });
       }
-      const recoveryCodes = db.crearCodigosRecuperacion(user.id);
+      const recoveryCodes = await db.crearCodigosRecuperacion(user.id);
       auditar({
         event: porRecuperacion ? '2fa_recovery_regenerated_with_code' : '2fa_recovery_regenerated',
         severity: 'warn',
@@ -576,26 +576,26 @@ async function manejarHttp(req, res) {
       if (!valido) return responder(res, 401, { error: 'Token de administración inválido.', code: 'UNAUTHORIZED' });
       const limite = Number(url.searchParams.get('limit') || 100);
       auditar({ event: 'admin_audit_read', ip, userAgent, detail: { limite } });
-      return responder(res, 200, { audit: db.listarAuditoria(limite) });
+      return responder(res, 200, { audit: await db.listarAuditoria(limite) });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/ranking') {
-      const user = usuarioDeRequest(req);
+      const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
       const limite = Number(url.searchParams.get('limit') || 20);
-      return responder(res, 200, { ranking: db.ranking(limite) });
+      return responder(res, 200, { ranking: await db.ranking(limite) });
     }
 
     if (req.method === 'GET' && url.pathname === '/api/history') {
-      const user = usuarioDeRequest(req);
+      const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
       const limite = Number(url.searchParams.get('limit') || 20);
-      return responder(res, 200, { history: db.historialUsuario(user.id, limite) });
+      return responder(res, 200, { history: await db.historialUsuario(user.id, limite) });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/logout') {
       const auth = leerBearer(req);
-      db.revocarSesion(auth);
+      await db.revocarSesion(auth);
       return responder(res, 200, { ok: true });
     }
 
@@ -628,14 +628,14 @@ const servidor = SEGURO
 
 const wss = new WebSocketServer({ noServer: true });
 
-servidor.on('upgrade', (req, socket, head) => {
+servidor.on('upgrade', async (req, socket, head) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   if (url.pathname !== '/ws') {
     socket.destroy();
     return;
   }
   const token = url.searchParams.get('token') || '';
-  const user = db.usuarioPorToken(token);
+  const user = await db.usuarioPorToken(token);
   if (!user) {
     socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
     socket.destroy();
@@ -691,13 +691,13 @@ wss.on('connection', (ws) => {
       ws.close(4008, 'Demasiados mensajes');
       return;
     }
-    manejarMensaje(ws, data);
+    manejarMensaje(ws, data).catch((error) => console.error('[ws] mensaje:', error.message));
   });
   ws.on('close', () => desconectar(ws));
   ws.on('error', (error) => console.warn('[ws] error', error.message));
 });
 
-function manejarMensaje(ws, data) {
+async function manejarMensaje(ws, data) {
   let mensaje;
   try {
     mensaje = JSON.parse(String(data));
@@ -733,14 +733,14 @@ function manejarMensaje(ws, data) {
   }
 }
 
-function verificarCuentaParaJugar(ws) {
+async function verificarCuentaParaJugar(ws) {
   if (!REQUIRE_VERIFIED && VERIFY_AFTER_MATCHES <= 0) return true;
-  const actual = db.usuarioPorId(ws.usuario.id);
+  const actual = await db.usuarioPorId(ws.usuario.id);
   if (!actual) {
     enviarError(ws, 'Sesión inválida.', 'UNAUTHORIZED');
     return false;
   }
-  const stats = db.estadisticasUsuario(actual.id);
+  const stats = await db.estadisticasUsuario(actual.id);
   const politica = politicaVerificacion({
     verified: actual.verified,
     games: stats.games,
@@ -763,9 +763,9 @@ function verificarCuentaParaJugar(ws) {
   return true;
 }
 
-function buscarPartida(ws) {
+async function buscarPartida(ws) {
   const user = ws.usuario;
-  if (!verificarCuentaParaJugar(ws)) return;
+  if (!(await verificarCuentaParaJugar(ws))) return;
   const actual = salaDeUsuario(user.id);
   if (actual) return enviarError(ws, 'Ya estás en una sala.');
   if (cola.some((q) => q.userId === user.id)) {
@@ -809,9 +809,9 @@ function salirDeCola(userId, ws = null) {
   difundirCola();
 }
 
-function crearSalaPrivada(ws) {
+async function crearSalaPrivada(ws) {
   const user = ws.usuario;
-  if (!verificarCuentaParaJugar(ws)) return;
+  if (!(await verificarCuentaParaJugar(ws))) return;
   if (salaDeUsuario(user.id)) return enviarError(ws, 'Ya estás en una sala.');
   salirDeCola(user.id, ws);
   const sala = crearSala('private');
@@ -829,10 +829,10 @@ function crearSalaPrivada(ws) {
   difundirSala(sala);
 }
 
-function unirseSala(ws, codigo) {
+async function unirseSala(ws, codigo) {
   const code = String(codigo || '').trim().toUpperCase();
   if (!code) return enviarError(ws, 'Escribe un código de sala.');
-  if (!verificarCuentaParaJugar(ws)) return;
+  if (!(await verificarCuentaParaJugar(ws))) return;
   if (salaDeUsuario(ws.usuario.id)) return enviarError(ws, 'Ya estás en una sala.');
   const sala = salas.get(code);
   if (!sala) return enviarError(ws, 'La sala no existe o ya terminó.');
@@ -1044,7 +1044,12 @@ function difundirEstado(sala) {
 }
 
 function guardarResultado(sala) {
-  try {
+  return guardarResultadoAsync(sala).catch((error) => {
+    console.error('[historial] no se pudo guardar el resultado:', error);
+  });
+}
+
+async function guardarResultadoAsync(sala) {
     const juego = sala.game;
     if (!juego || juego.phase !== 'finished' || juego.winnerTeam === null) return;
     const scores = juego.scores;
@@ -1063,7 +1068,7 @@ function guardarResultado(sala) {
     });
     if (jugadores.length !== 4) return;
 
-    const id = db.registrarPartida({
+    const id = await db.registrarPartida({
       roomCode: sala.code,
       roomType: sala.tipo,
       winnerTeam,
@@ -1087,9 +1092,6 @@ function guardarResultado(sala) {
         hands: juego.handNumber
       }
     });
-  } catch (error) {
-    console.error('[historial] no se pudo guardar el resultado:', error);
-  }
 }
 
 function estadoSala(sala, userId) {
@@ -1152,7 +1154,7 @@ async function enviarCodigoVerificacion(user) {
   if (!user || !user.email) {
     return { ok: false, sent: false, error: 'La cuenta no tiene correo.' };
   }
-  const { codigo, expira } = db.crearCodigo(user.id, 'verify', VERIFY_CODE_TTL_MS);
+  const { codigo, expira } = await db.crearCodigo(user.id, 'verify', VERIFY_CODE_TTL_MS);
 
   // Fire-and-forget: el registro/verificación no espera a Gmail.
   enviarCodigo({
@@ -1273,8 +1275,8 @@ function leerBearer(req) {
   return header.slice(7).trim();
 }
 
-function usuarioDeRequest(req) {
-  return db.usuarioPorToken(leerBearer(req));
+async function usuarioDeRequest(req) {
+  return await db.usuarioPorToken(leerBearer(req));
 }
 
 setInterval(() => {
@@ -1313,8 +1315,8 @@ setInterval(() => {
 }, 60_000).unref();
 
 setInterval(() => {
-  db.limpiarAuditoria(AUDIT_RETENTION_DAYS);
-  db.limpiarCodigosExpirados();
+  db.limpiarAuditoria(AUDIT_RETENTION_DAYS).catch((error) => console.error('[db] limpieza auditoría:', error.message));
+  db.limpiarCodigosExpirados().catch((error) => console.error('[db] limpieza códigos:', error.message));
 }, 60 * 60_000).unref();
 
 setInterval(() => {
@@ -1332,7 +1334,7 @@ servidor.listen(PUERTO, '0.0.0.0', () => {
   console.log('  CAÍDA ONLINE — backend');
   console.log(`  ${protocolo.toUpperCase()}  ${protocolo}://localhost:${PUERTO}/api`);
   console.log(`  WS    ${protocoloWs}://localhost:${PUERTO}/ws?token=...`);
-  console.log(`  DB    ${DB_PATH}`);
+  console.log(`  DB    PostgreSQL ${db.url.hostname}${db.url.pathname}`);
   console.log(`  TLS   ${SEGURO ? 'activo' : 'desactivado (usa TLS_CERT/TLS_KEY o un proxy HTTPS)'}`);
   console.log('==============================================');
 });
@@ -1340,7 +1342,7 @@ servidor.listen(PUERTO, '0.0.0.0', () => {
 function cerrar() {
   console.log('Cerrando servidor...');
   for (const ws of wss.clients) ws.close(1001, 'Servidor detenido');
-  db.cerrar();
+  db.cerrar().catch((error) => console.warn('[db] cierre:', error.message));
   servidor.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 3000).unref();
 }

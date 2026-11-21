@@ -7,6 +7,7 @@ import os from 'node:os';
 import { mkdtempSync, rmSync } from 'node:fs';
 import WebSocket from 'ws';
 import { codigoTotp } from '../src/security.js';
+import { reiniciarBaseDePruebas, urlPruebas } from './helpers/test-db.js';
 
 const PUERTO = 31337;
 const BASE = `http://127.0.0.1:${PUERTO}`;
@@ -97,10 +98,20 @@ async function postJson(ruta, cuerpo, token = null) {
 }
 
 test.before(async () => {
+  await reiniciarBaseDePruebas();
   const raiz = path.dirname(fileURLToPath(import.meta.url));
   proceso = spawn(process.execPath, [path.join(raiz, '..', 'src', 'index.js')], {
     cwd: path.join(raiz, '..'),
-    env: { ...process.env, PORT: String(PUERTO), DB_PATH: path.join(dirTemp, 'test.db'), ENV_FILE: path.join(dirTemp, 'test.env'), TURN_MS: '5000', DEV_CODES: '1', AUTH_RATE_MAX: '80', ADMIN_TOKEN: 'test-admin' },
+    env: {
+      ...process.env,
+      PORT: String(PUERTO),
+      DATABASE_URL: urlPruebas(),
+      ENV_FILE: path.join(dirTemp, 'test.env'),
+      TURN_MS: '5000',
+      DEV_CODES: '1',
+      AUTH_RATE_MAX: '80',
+      ADMIN_TOKEN: 'test-admin'
+    },
     stdio: ['ignore', 'pipe', 'pipe']
   });
   proceso.stderr.on('data', (d) => process.stderr.write(d));

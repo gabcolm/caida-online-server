@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PartidaCaida, evaluarCantoDesdeValores, puntosCaida, siguienteValor } from '../src/game.js';
 import { BaseDatos, validarCredenciales } from '../src/db.js';
+import { reiniciarBaseDePruebas, urlPruebas } from './helpers/test-db.js';
 
 function iniciarJuego(nombres = ['A', 'B', 'C', 'D']) {
   const juego = new PartidaCaida(nombres);
@@ -173,19 +174,25 @@ test('la partida termina con un ganador y no acepta jugadas después', () => {
   assert.equal(juego.jugar(0, 'Oro_1').ok, false);
 });
 
-test('registro, login y validación de credenciales', () => {
-  const db = new BaseDatos(':memory:');
-  assert.equal(validarCredenciales('ab', '123456'), 'El alias debe tener entre 3 y 18 caracteres.');
-  assert.equal(validarCredenciales('jugador', '123'), 'La contraseña debe tener al menos 6 caracteres.');
-  const user = db.crearUsuario('Gabriel', 'secreto123');
-  assert.equal(user.username, 'Gabriel');
-  assert.equal(user.coins, 2000);
-  assert.equal(db.verificarCredenciales('gabriel', 'secreto123')?.id, user.id);
-  assert.equal(db.verificarCredenciales('Gabriel', 'incorrecta'), null);
-  assert.throws(() => db.crearUsuario('GABRIEL', 'otra1234'), /registrado/i);
-  const token = db.crearSesion(user.id);
-  assert.equal(db.usuarioPorToken(token)?.username, 'Gabriel');
-  db.revocarSesion(token);
-  assert.equal(db.usuarioPorToken(token), null);
-  db.cerrar();
+test('registro, login y validación de credenciales', async () => {
+  await reiniciarBaseDePruebas();
+  const db = new BaseDatos(urlPruebas());
+  await db.iniciar();
+
+  try {
+    assert.equal(validarCredenciales('ab', '123456'), 'El alias debe tener entre 3 y 18 caracteres.');
+    assert.equal(validarCredenciales('jugador', '123'), 'La contraseña debe tener al menos 6 caracteres.');
+    const user = await db.crearUsuario('Gabriel', 'secreto123');
+    assert.equal(user.username, 'Gabriel');
+    assert.equal(user.coins, 2000);
+    assert.equal((await db.verificarCredenciales('gabriel', 'secreto123'))?.id, user.id);
+    assert.equal(await db.verificarCredenciales('Gabriel', 'incorrecta'), null);
+    await assert.rejects(() => db.crearUsuario('GABRIEL', 'otra1234'), /registrado/i);
+    const token = await db.crearSesion(user.id);
+    assert.equal((await db.usuarioPorToken(token))?.username, 'Gabriel');
+    await db.revocarSesion(token);
+    assert.equal(await db.usuarioPorToken(token), null);
+  } finally {
+    await db.cerrar();
+  }
 });

@@ -33,7 +33,9 @@ export function limpiarValor(valor) {
 // Variables que se leen en el arranque; se sanean una sola vez.
 const CLAVES_SANEADAS = [
   'PORT',
-  'DB_PATH',
+  'DATABASE_URL',
+  'DATABASE_URL_TEST',
+  'PG_POOL_MAX',
   'CORS_ORIGIN',
   'TRUST_PROXY',
   'NODE_ENV',

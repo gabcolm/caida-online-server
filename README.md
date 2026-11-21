@@ -4,7 +4,7 @@ Servidor de autenticación, salas, matchmaking y partidas en tiempo real.
 
 ## Requisitos
 
-- Node.js **22.5+** (usa `node:sqlite`).
+- Node.js **24+** (PostgreSQL mediante `pg`).
 - `npm install`.
 
 ## Arrancar
@@ -19,7 +19,7 @@ npm start
 
 - HTTP: `http://localhost:3000/api`
 - WebSocket: `ws://localhost:3000/ws?token=...`
-- Base de datos: `Server/data/caida.db` (se crea sola).
+- Base de datos: PostgreSQL (`DATABASE_URL`). El esquema y los índices se crean solos al arrancar.
 
 ### Archivo `.env`
 
@@ -40,7 +40,7 @@ Variables de entorno:
 | Variable | Default | Descripción |
 |---|---|---|
 | `PORT` | `3000` | Puerto HTTP/WS |
-| `DB_PATH` | `Server/data/caida.db` | Ruta SQLite |
+| `DATABASE_URL` | `postgresql://caida@localhost:5432/caida_online` | Cadena de conexión PostgreSQL (Neon en producción) |
 | `TURN_MS` | `30000` | Tiempo máximo por turno |
 | `RECONNECT_MS` | `45000` | Gracia de reconexión en sala de espera |
 | `CORS_ORIGIN` | `*` | Origen permitido (separa varios con coma) |
@@ -122,7 +122,7 @@ Los códigos de recuperación se muestran una sola vez al activar/regenerar 2FA.
 El desafío de login vence en 5 minutos y admite 5 intentos.
 
 Las contraseñas se guardan con `scrypt` + sal. Los tokens son opacos, aleatorios
-y viven 30 días en SQLite. Al cambiar la contraseña se revocan todas las
+y viven 30 días en PostgreSQL. Al cambiar la contraseña se revocan todas las
 sesiones de esa cuenta.
 
 Los códigos de verificación/recuperación son de 6 dígitos, vencen en 15 minutos
@@ -344,9 +344,8 @@ Configuración del Web Service:
 El backend escucha en `process.env.PORT` (lo asigna Render) sobre `0.0.0.0`,
 y `GET /api/health` responde `200` con `{"ok":true,...}` sin tocar la base.
 
-**Versión de Node:** el proyecto usa `node:sqlite`, disponible sin flag desde
-Node 22.13/23.4. `package.json` exige **Node 24+** para igualar el entorno
-probado. No uses Node 18/20: el módulo no existe.
+**Versión de Node:** el backend usa PostgreSQL mediante `pg` y `DATABASE_URL`.
+`package.json` exige **Node 24+** para igualar el entorno probado.
 
 Variables de entorno en el panel de Render (nunca en el repositorio):
 
@@ -356,6 +355,7 @@ DEV_CODES=0
 TRUST_PROXY=1
 CORS_ORIGIN=*
 ADMIN_TOKEN=un-token-largo
+DATABASE_URL=postgresql://usuario:clave@ep-xxxx.region.aws.neon.tech/neondb?sslmode=require
 
 # Correo por API HTTP (Render Free bloquea los puertos SMTP)
 MAIL_PROVIDER=resend
@@ -404,18 +404,18 @@ En los logs de Render busca:
 > vacía o la cuenta no tiene correo, no se envía nada: revisa el log
 > `[recovery] solicitud recibida`.
 
-### Persistencia de datos en Render
+### Persistencia de datos (PostgreSQL / Neon)
 
-- Usuarios, monedas, ranking, historial, códigos y auditoría viven en SQLite:
-  `data/caida.db` (o `DB_PATH`).
-- En el **plan gratuito el disco es efímero**: cada deploy, reinicio o
-  spin-down borra la base y vuelve a empezar vacía.
-- `data/` está en `.gitignore`, así que la base **no** se sube al repositorio.
-- Para conservar datos:
-  - **Render Disk** (plan pago), montado por ejemplo en `/var/data`, con
-    `DB_PATH=/var/data/caida.db`; o
-  - migrar a **PostgreSQL** (Neon, Supabase, Render Postgres) cambiando
-    `src/db.js`.
-- El plan free suspende el servicio tras ~15 minutos sin tráfico: la primera
-  petición puede tardar ~50 s y los WebSocket se cortan en cada deploy.
+- Usuarios, monedas, ranking, historial, códigos y auditoría viven en PostgreSQL
+  (`DATABASE_URL`, por ejemplo la cadena de Neon).
+- La base **no** depende del disco efímero de Render: sobrevive a deploys,
+  reinicios y spin-down.
+- Al arrancar se ejecutan `CREATE TABLE IF NOT EXISTS` e índices; no hay que
+  crear el esquema a mano.
+- En local usa `DATABASE_URL=postgresql://caida:...@localhost:5432/caida_online`
+  y `DATABASE_URL_TEST=...caida_online_test` para `npm test`.
+- Neon Free incluye 0.5 GB y escala a cero; la primera consulta tras
+  inactividad puede tardar alrededor de un segundo.
+- El plan free de Render suspende el servicio tras ~15 minutos sin tráfico: la
+  primera petición puede tardar ~50 s y los WebSocket se cortan en cada deploy.
 
