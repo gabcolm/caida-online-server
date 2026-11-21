@@ -1477,7 +1477,10 @@ async function iniciarPartidaPrivada(ws) {
     .map((s, seat) => (s && s.userId ? { ...s, seat } : null))
     .filter(Boolean);
 
-  if (humanos.length < 2) return enviarError(ws, 'Necesitas al menos 2 jugadores para iniciar.');
+  if (humanos.length < 1) return enviarError(ws, 'Necesitas al menos 1 jugador para iniciar.');
+  if (humanos.length < 2 && !(sala.allowBots && sala.betAmount === 0)) {
+    return enviarError(ws, 'Activa los bots o espera a otro jugador para iniciar.', 'NOT_ENOUGH_PLAYERS');
+  }
   if (sala.betAmount > 0 && humanos.length !== 4) {
     return enviarError(ws, 'Para apostar monedas deben estar los 4 jugadores (2v2).', 'INSUFFICIENT_PLAYERS');
   }

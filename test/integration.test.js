@@ -522,6 +522,9 @@ test('amigos: cÃƒÆ’Ã‚Â³digo, solicitud y aceptaciÃƒÆ’Ã‚Â³n',
   assert.equal(listaA.myFriendCode, a.user.friendCode);
 
   const solicitud = await postJson('/api/friends/request', { query: b.user.friendCode }, a.token);
+
+  const aSiMismo = await postJson('/api/friends/request', { query: a.user.friendCode }, a.token);
+  assert.equal(aSiMismo.status, 400);
   assert.equal(solicitud.status, 200);
 
   const listaB = await (await fetch(BASE + '/api/friends', {
@@ -602,6 +605,34 @@ test('sala privada: asientos, apuesta e inicio con saldo suficiente', async () =
     assert.equal(perfil.user.coins, 1500);
   } finally {
     for (const cliente of clientes) cliente.cerrar();
+  }
+});
+
+
+test('sala privada: el anfitrión solo inicia con bots activados', async () => {
+  const sufijo = Date.now().toString().slice(-5);
+  const host = await registrar('Solo' + sufijo);
+  const cliente = new Cliente(host.token);
+  await cliente.abrir();
+
+  try {
+    cliente.enviar({ type: 'create_private_room' });
+    const creada = await cliente.esperar('private_room_state');
+    assert.ok(creada.room.code);
+
+    cliente.enviar({ type: 'update_private_room_settings', betAmount: 0, allowBots: true });
+    let estado = null;
+    for (let i = 0; i < 10; i++) {
+      estado = await cliente.esperar('private_room_state');
+      if (estado.room.allowBots) break;
+    }
+    assert.equal(estado.room.allowBots, true);
+
+    cliente.enviar({ type: 'start_private_match' });
+    const juego = await cliente.esperar('gameState', 8000);
+    assert.ok(juego.state);
+  } finally {
+    cliente.cerrar();
   }
 });
 

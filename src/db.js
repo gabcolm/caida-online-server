@@ -187,6 +187,7 @@ export class BaseDatos {
   /** Crea tablas e índices si no existen. */
   async iniciar() {
     await this.pool.query(ESQUEMA);
+    await this.pool.query('DELETE FROM friendships WHERE requester_id = addressee_id');
     await this.asegurarFriendCodes();
   }
 
@@ -778,6 +779,7 @@ export class BaseDatos {
        FROM friendships f
        JOIN users u ON u.id = CASE WHEN f.requester_id = $1 THEN f.addressee_id ELSE f.requester_id END
        WHERE f.status = 'accepted' AND (f.requester_id = $1 OR f.addressee_id = $1)
+         AND u.id <> $1
        ORDER BY u.username ASC`,
       [Number(userId)]
     );
