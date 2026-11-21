@@ -239,7 +239,11 @@ async function manejarHttp(req, res) {
         userAgent,
         detail: { provider }
       });
-      return responder(res, created ? 201 : 200, { token, user, provider });
+      return responder(res, created ? 201 : 200, {
+        token,
+        user: { ...user, facebookLinked: provider === 'facebook' || await db.tieneFacebook(user.id) },
+        provider
+      });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/register') {
@@ -371,7 +375,10 @@ async function manejarHttp(req, res) {
     if (req.method === 'GET' && url.pathname === '/api/me') {
       const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
-      return responder(res, 200, { user, stats: await db.estadisticasUsuario(user.id) });
+      return responder(res, 200, {
+        user: { ...user, facebookLinked: await db.tieneFacebook(user.id) },
+        stats: await db.estadisticasUsuario(user.id)
+      });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/wallet/ad-reward') {

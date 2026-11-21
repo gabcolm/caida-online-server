@@ -880,8 +880,15 @@ export class BaseDatos {
     return rowCount > 0;
   }
 
-  async sonAmigos(a, b) {
+  async tieneFacebook(userId) {
     const { rowCount } = await this.pool.query(
+      "SELECT 1 FROM social_accounts WHERE user_id = $1 AND provider = 'facebook'",
+      [Number(userId)]
+    );
+    return rowCount > 0;
+  }
+
+  async sonAmigos(a, b) {    const { rowCount } = await this.pool.query(
       `SELECT 1 FROM friendships
        WHERE status = 'accepted'
          AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))`,
