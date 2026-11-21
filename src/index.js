@@ -45,6 +45,16 @@ const VERIFY_AFTER_MATCHES = Number(process.env.VERIFY_AFTER_MATCHES || 0);
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || '';
 const ALERT_FAIL_THRESHOLD = Number(process.env.ALERT_FAIL_THRESHOLD || 3);
 const AUDIT_RETENTION_DAYS = Number(process.env.AUDIT_RETENTION_DAYS || 90);
+
+const AD_REWARD_COINS = Math.max(1, Number(process.env.AD_REWARD_COINS || 100));
+const AD_REWARD_COOLDOWN_MS = Math.max(1000, Number(process.env.AD_REWARD_COOLDOWN_MS || 60000));
+const PRODUCTOS_MONEDAS = Object.freeze({
+  monedas_1000: { coins: 1000, precio: 1.99 },
+  monedas_5000: { coins: 5500, precio: 7.99 },
+  monedas_15000: { coins: 17000, precio: 19.99 },
+  monedas_50000: { coins: 50000, precio: 49.99 }
+});
+const ultimoAnuncio = new Map();
 const TOTP_EMISOR = process.env.TOTP_ISSUER || 'Caída Online';
 
 function minutosCodigo(valor, defecto = 15) {
@@ -101,6 +111,7 @@ const RUTAS_AUTH = new Set([
   '/api/register',
   '/api/login',
   '/api/login/2fa',
+  '/api/auth/social',
   '/api/account/email',
   '/api/verify/request',
   '/api/verify',
@@ -177,6 +188,36 @@ async function manejarHttp(req, res) {
 
     if (req.method === 'GET' && url.pathname === '/api/health') {
       return responder(res, 200, { ok: true, service: 'caida-online', version: '1.0.0', rooms: salas.size, queue: cola.length, secure: seguro });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/auth/social') {
+      const body = await leerJson(req);
+      const provider = String(body.provider || '').trim().toLowerCase();
+      if (provider !== 'google' && provider !== 'facebook') {
+        return responder(res, 400, { error: 'Proveedor social no soportado.', code: 'BAD_PROVIDER' });
+      }
+      const providerId = String(body.providerUserId || '').trim();
+      if (providerId.length < 3) {
+        return responder(res, 400, { error: 'Falta el identificador del proveedor.', code: 'BAD_SOCIAL_ID' });
+      }
+      const email = body.email ? String(body.email).trim() : null;
+      if (email) {
+        const errorEmail = validarEmail(email);
+        if (errorEmail) return responder(res, 400, { error: errorEmail });
+      }
+      const nombre = body.name ? String(body.name).slice(0, 40) : null;
+      const { user, created } = await db.crearUsuarioSocial({ provider, providerId, email, name: nombre });
+      const token = await db.crearSesion(user.id);
+      await db.actualizarUltimoAcceso(user.id, ip);
+      auditar({
+        event: created ? 'social_register' : 'social_login',
+        userId: user.id,
+        username: user.username,
+        ip,
+        userAgent,
+        detail: { provider }
+      });
+      return responder(res, created ? 201 : 200, { token, user, provider });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/register') {
@@ -309,6 +350,75 @@ async function manejarHttp(req, res) {
       const user = await usuarioDeRequest(req);
       if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
       return responder(res, 200, { user, stats: await db.estadisticasUsuario(user.id) });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/wallet/ad-reward') {
+      const user = await usuarioDeRequest(req);
+      if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
+
+      const ahora = Date.now();
+      const anterior = ultimoAnuncio.get(user.id) || 0;
+      if (ahora - anterior < AD_REWARD_COOLDOWN_MS) {
+        const espera = Math.ceil((AD_REWARD_COOLDOWN_MS - (ahora - anterior)) / 1000);
+        return responder(res, 429, {
+          error: `Espera ${espera} s antes de otro anuncio.`,
+          code: 'AD_COOLDOWN',
+          retryAfter: espera
+        });
+      }
+      ultimoAnuncio.set(user.id, ahora);
+
+      const coins = await db.sumarMonedas(user.id, AD_REWARD_COINS);
+      auditar({
+        event: 'wallet_ad_reward',
+        userId: user.id,
+        username: user.username,
+        ip,
+        userAgent,
+        detail: { reward: AD_REWARD_COINS, saldo: coins }
+      });
+      return responder(res, 200, { ok: true, coins, reward: AD_REWARD_COINS });
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/wallet/purchase') {
+      const user = await usuarioDeRequest(req);
+      if (!user) return responder(res, 401, { error: 'Sesión inválida o expirada.', code: 'UNAUTHORIZED' });
+
+      const body = await leerJson(req);
+      const productId = String(body.productId || '').trim();
+      const producto = PRODUCTOS_MONEDAS[productId];
+      if (!producto) {
+        return responder(res, 400, { error: 'Producto de monedas desconocido.', code: 'BAD_PRODUCT' });
+      }
+
+      // TODO producción: validar el recibo con Google Play antes de acreditar.
+      const receiptId = String(body.receiptId || '').trim();
+      if (receiptId.length < 4) {
+        return responder(res, 400, { error: 'Falta el recibo de compra.', code: 'BAD_RECEIPT' });
+      }
+
+      const nuevo = await db.registrarCompra({
+        receiptId,
+        userId: user.id,
+        productId,
+        coins: producto.coins
+      });
+
+      if (!nuevo) {
+        const actual = await db.usuarioPorId(user.id);
+        return responder(res, 200, { ok: true, duplicate: true, coins: actual?.coins ?? user.coins });
+      }
+
+      const coins = await db.sumarMonedas(user.id, producto.coins);
+      auditar({
+        event: 'wallet_purchase',
+        userId: user.id,
+        username: user.username,
+        ip,
+        userAgent,
+        detail: { productId, coins: producto.coins, saldo: coins }
+      });
+      return responder(res, 200, { ok: true, coins, added: producto.coins, productId });
     }
 
     if (req.method === 'POST' && url.pathname === '/api/account/email') {

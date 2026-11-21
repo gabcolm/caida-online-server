@@ -463,6 +463,51 @@ test('2FA TOTP, códigos de recuperación y auditoría de accesos', async () => 
   assert.match(html, /CARGAR EVENTOS/);
 });
 
+
+
+test('billetera: recompensa por anuncio y compra idempotente', async () => {
+  const sufijo = Date.now().toString().slice(-6);
+  const datos = await registrar('Wallet' + sufijo);
+  const token = datos.token;
+  assert.equal(datos.user.coins, 2000);
+
+  const primera = await postJson('/api/wallet/ad-reward', {}, token);
+  assert.equal(primera.status, 200);
+  assert.equal(primera.body.coins, 2100);
+
+  const segunda = await postJson('/api/wallet/ad-reward', {}, token);
+  assert.equal(segunda.status, 429);
+
+  const recibo = 'recibo-' + sufijo;
+  const compra = await postJson('/api/wallet/purchase', { productId: 'monedas_5000', receiptId: recibo }, token);
+  assert.equal(compra.status, 200);
+  assert.equal(compra.body.coins, 7600);
+
+  const repetida = await postJson('/api/wallet/purchase', { productId: 'monedas_5000', receiptId: recibo }, token);
+  assert.equal(repetida.status, 200);
+  assert.equal(repetida.body.duplicate, true);
+  assert.equal(repetida.body.coins, 7600);
+
+  const me = await fetch(BASE + '/api/me', { headers: { Authorization: 'Bearer ' + token } });
+  const { user } = await me.json();
+  assert.equal(user.coins, 7600);
+});
+
+test('login social crea la cuenta una sola vez', async () => {
+  const id = 'google-' + Date.now();
+  const primera = await postJson('/api/auth/social', { provider: 'google', providerUserId: id, name: 'Social Uno' });
+  assert.equal(primera.status, 201);
+  assert.ok(primera.body.token);
+  assert.equal(primera.body.user.coins, 2000);
+
+  const segunda = await postJson('/api/auth/social', { provider: 'google', providerUserId: id, name: 'Social Uno' });
+  assert.equal(segunda.status, 200);
+  assert.equal(segunda.body.user.id, primera.body.user.id);
+
+  const invalido = await postJson('/api/auth/social', { provider: 'twitter', providerUserId: 'x123' });
+  assert.equal(invalido.status, 400);
+});
+
 test('limita intentos de autenticación por IP', async () => {
   let bloqueado = false;
   for (let i = 0; i < 60 && !bloqueado; i++) {

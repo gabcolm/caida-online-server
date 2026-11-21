@@ -202,7 +202,7 @@ export class PartidaCaida {
 
   evaluarCantos() {
     const indiceMano = (this.dealer + 1) % 4;
-    this.cantos = [];
+    const candidatos = [];
 
     for (let seat = 0; seat < 4; seat++) {
       const mano = this.hands[seat];
@@ -212,9 +212,13 @@ export class PartidaCaida {
       if (canto) {
         canto.seat = seat;
         canto.cartasJugadas = 0;
-        this.cantos.push(canto);
+        canto.orden = distanciaMano;
+        candidatos.push(canto);
       }
     }
+
+    // Un único canto por jugador, anunciado en orden de turno desde el Mano.
+    this.cantos = candidatos.sort((a, b) => a.distanciaMano - b.distanciaMano);
 
     this.eventSeq += 1;
     if (this.cantos.length > 0) {
@@ -224,6 +228,11 @@ export class PartidaCaida {
     }
 
     for (const c of this.cantos) {
+      const yaRegistrado = this.cantoHistorial.some((e) => (
+        e.handNumber === this.handNumber && e.seat === c.seat && e.tipo === c.tipo && e.estado === 'cantado'
+      ));
+      if (yaRegistrado) continue;
+
       const oculta = c.tipo === 'Ronda' && !c.fueVisto;
       this.registrarCanto(c.seat, c.tipo, c.puntos, 'cantado', {
         oculto: oculta,

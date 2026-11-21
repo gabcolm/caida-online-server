@@ -196,3 +196,32 @@ test('registro, login y validación de credenciales', async () => {
     await db.cerrar();
   }
 });
+
+test('un solo canto por mano y anunciado en orden desde el Mano', () => {
+  assert.equal(evaluarCantoDesdeValores([2, 3, 4], false).tipo, 'Patrulla');
+  assert.equal(evaluarCantoDesdeValores([1, 11, 12], false).tipo, 'Registro');
+  assert.equal(evaluarCantoDesdeValores([5, 5, 6], false).tipo, 'Vigía');
+  assert.equal(evaluarCantoDesdeValores([7, 7, 7], true).tipo, 'Tribilín');
+
+  const juego = new PartidaCaida(['A', 'B', 'C', 'D']);
+  juego.phase = 'playing';
+  juego.dealer = 3; // el Mano es el asiento 0
+  juego.hands = [
+    [{ valor: 2 }, { valor: 3 }, { valor: 4 }],
+    [{ valor: 1 }, { valor: 11 }, { valor: 12 }],
+    [{ valor: 5 }, { valor: 5 }, { valor: 6 }],
+    [{ valor: 9 }, { valor: 9 }, { valor: 9 }]
+  ];
+  juego.resolverPaViajeInmediato = () => {};
+  juego.evaluarCantos();
+
+  assert.equal(juego.cantos.length, 4);
+  assert.equal(juego.cantos.filter((c) => c.seat === 0).length, 1);
+  assert.equal(juego.cantos[0].seat, 0);
+  assert.deepEqual(juego.cantos.map((c) => c.seat), [0, 1, 2, 3]);
+
+  const antes = juego.cantoHistorial.filter((e) => e.estado === 'cantado').length;
+  juego.evaluarCantos();
+  const despues = juego.cantoHistorial.filter((e) => e.estado === 'cantado').length;
+  assert.equal(despues, antes);
+});

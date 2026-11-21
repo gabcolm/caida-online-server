@@ -132,6 +132,24 @@ CREATE TABLE IF NOT EXISTS match_players (
   PRIMARY KEY (match_id, user_id)
 );
 CREATE INDEX IF NOT EXISTS idx_match_players_user ON match_players(user_id);
+
+CREATE TABLE IF NOT EXISTS social_accounts (
+  provider TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at BIGINT NOT NULL,
+  PRIMARY KEY (provider, provider_id)
+);
+CREATE INDEX IF NOT EXISTS idx_social_user ON social_accounts(user_id);
+
+CREATE TABLE IF NOT EXISTS purchases (
+  receipt_id TEXT PRIMARY KEY,
+  user_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  product_id TEXT NOT NULL,
+  coins INTEGER NOT NULL,
+  created_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_purchases_user ON purchases(user_id, created_at DESC);
 `;
 
 export class BaseDatos {
@@ -701,6 +719,93 @@ export class BaseDatos {
       winRate: games > 0 ? Math.round((1000 * wins) / games) / 10 : 0,
       points: Number(fila?.points || 0)
     };
+  }
+
+  async sumarMonedas(userId, cantidad) {
+    const delta = Math.trunc(Number(cantidad) || 0);
+    const { rows } = await this.pool.query(
+      'UPDATE users SET coins = coins + $1 WHERE id = $2 RETURNING coins',
+      [delta, Number(userId)]
+    );
+    return rows[0] ? Number(rows[0].coins) : null;
+  }
+
+  async registrarCompra({ receiptId, userId, productId, coins }) {
+    const { rowCount } = await this.pool.query(
+      `INSERT INTO purchases (receipt_id, user_id, product_id, coins, created_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (receipt_id) DO NOTHING`,
+      [String(receiptId), Number(userId), String(productId), Math.trunc(Number(coins) || 0), Date.now()]
+    );
+    return rowCount > 0;
+  }
+
+  async usuarioPorSocial(provider, providerId) {
+    const { rows } = await this.pool.query(
+      `SELECT u.* FROM social_accounts s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.provider = $1 AND s.provider_id = $2`,
+      [String(provider), String(providerId)]
+    );
+    return rows[0] ? this.publico(rows[0]) : null;
+  }
+
+  async crearUsuarioSocial({ provider, providerId, email = null, name = null }) {
+    const existente = await this.usuarioPorSocial(provider, providerId);
+    if (existente) return { user: existente, created: false };
+
+    const emailLimpio = email ? String(email).trim() : null;
+    const emailKey = emailLimpio ? normalizarEmail(emailLimpio) : null;
+
+    if (emailKey) {
+      const { rows } = await this.pool.query('SELECT * FROM users WHERE email_key = $1', [emailKey]);
+      if (rows[0]) {
+        await this.pool.query(
+          `INSERT INTO social_accounts (provider, provider_id, user_id, created_at)
+           VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+          [String(provider), String(providerId), rows[0].id, Date.now()]
+        );
+        return { user: this.publico(rows[0]), created: false };
+      }
+    }
+
+    const base = String(name || (emailLimpio ? emailLimpio.split('@')[0] : 'Jugador'))
+      .normalize('NFKC')
+      .replace(/[^\p{L}\p{N} _-]/gu, '')
+      .trim()
+      .slice(0, 12) || 'Jugador';
+
+    const salt = randomBytes(16).toString('hex');
+    const hash = scryptSync(randomBytes(24).toString('hex'), salt, 64).toString('hex');
+
+    for (let intento = 0; intento < 6; intento++) {
+      const username = `${base}${randomInt(1000, 9999)}`;
+      const key = normalizarUsuario(username);
+      const cliente = await this.pool.connect();
+      try {
+        await cliente.query('BEGIN');
+        const { rows } = await cliente.query(
+          `INSERT INTO users (username, username_key, salt, hash, email, email_key, verified, verified_at, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           RETURNING *`,
+          [username, key, salt, hash, emailLimpio, emailKey, Boolean(emailLimpio), emailLimpio ? Date.now() : null, Date.now()]
+        );
+        const user = rows[0];
+        await cliente.query(
+          'INSERT INTO social_accounts (provider, provider_id, user_id, created_at) VALUES ($1, $2, $3, $4)',
+          [String(provider), String(providerId), user.id, Date.now()]
+        );
+        await cliente.query('COMMIT');
+        return { user: this.publico(user), created: true };
+      } catch (error) {
+        await cliente.query('ROLLBACK').catch(() => {});
+        if (error.code !== '23505') throw error;
+      } finally {
+        cliente.release();
+      }
+    }
+
+    throw new Error('No se pudo generar un alias único para la cuenta social.');
   }
 
   async cerrar() {
